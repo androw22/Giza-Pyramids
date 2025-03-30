@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Giza Pyramids - Enhanced Sun Effects</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            color: #fff;
+            font-family: monospace;
+        }
+        canvas { display: block; }
+        #info {
+            position: absolute;
+            top: 10px;
+            width: 100%;
+            text-align: center;
+            z-index: 100;
+            font-size: 14px;
+            color: white;
+            text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.7);
+        }
+        #controls-container {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 101;
+            background-color: rgba(0, 0, 0, 0.75);
+            padding: 12px 18px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5);
+            user-select: none;
+        }
+        #controls-container label { margin-right: 5px; font-weight: bold; }
+        #controls-container input[type="range"] { cursor: pointer; width: 160px; vertical-align: middle; }
+        #speedValue { min-width: 40px; text-align: right; font-weight: bold; }
+
+        .error-message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 25px 35px;
+            background-color: rgba(255, 165, 0, 0.92); /* Default: Warning orange */
+            color: white;
+            border: 3px solid #ddd; /* Lighter border for warning */
+            border-radius: 10px;
+            text-align: center;
+            z-index: 200;
+            font-size: 16px;
+            font-weight: normal;
+            line-height: 1.5;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.6);
+            display: none;
+            max-width: 90%;
+            transition: opacity 0.3s ease-in-out, background-color 0.3s ease;
+            opacity: 0;
+            box-sizing: border-box;
+        }
+         .error-message strong {
+             display: block;
+             margin-bottom: 12px;
+             font-weight: bold;
+             font-size: 18px;
+         }
+        .error-message.fatal {
+             background-color: rgba(220, 20, 60, 0.92); /* Crimson red for fatal errors */
+             border-color: white; /* White border for fatal */
+             color: #fff; /* Ensure text is white on dark red */
+        }
+        .error-message.fatal strong {
+            color: #fff; /* Ensure title is white */
+        }
+         .error-message code {
+             background-color: rgba(0, 0, 0, 0.3);
+             padding: 3px 6px;
+             border-radius: 4px;
+             font-size: 0.9em;
+             color: #f0f0f0; /* Light grey for code snippets */
+             display: inline-block; /* Allow word break inside */
+             word-break: break-all; /* Break long URLs */
+             margin: 0 2px;
+         }
+    </style>
+
+    <!-- Import map for Three.js modules -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"
+        }
+      }
+    </script>
+</head>
+<body>
+    <div id="info">Giza Pyramids Simulation - Enhanced Sun Effects (Bloom & Lens Flare)</div>
+    <div id="controls-container">
+        <label for="speedSlider">Cycle Speed:</label>
+        <input type="range" id="speedSlider" min="0.1" max="20" step="0.1" value="1.0">
+        <span id="speedValue">1.0x</span>
+    </div>
+    <div id="error-message-display" class="error-message">Error Message Placeholder</div>
+
+    <script type="module">
+        // Import necessary modules from Three.js
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { Lensflare, LensflareElement } from 'three/addons/objects/Lensflare.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'; // For correct color space
+
+        // Declare global variables
+        let scene, camera, renderer, composer, bloomPass, outputPass, controls, clock;
+        let sunLight, sunSphere, moonLight, moonSphere, ambientLight, hemisphereLight;
+        let ground, pyramids = [];
+        let cloudInstanceMesh;
+        let stars;
+        let lensFlare;
+        const textureLoader = new THREE.TextureLoader(); // Loader for textures
+        let animationRequestId = null; // To control the animation loop
+        let lastErrorMessage = null; // Track last error to avoid flooding
+        const errorDisplayTimeout = 15000; // How long non-fatal errors are shown (ms)
+        let errorHideTimer = null; // Timer for hiding non-fatal errors
+        let animateLoopFatalErrorLogged = false; // Flag to prevent repeat logs in animate
+
+        // Track which warnings have been shown to avoid repetition
+        const warningsShown = {
+            displacementPlaceholder: false, pyramidPlaceholder: false, moonTextureFallback: false,
+            generatedCloudTexture: false, starTextureFallback: false, webglContextLoss: false,
+            dayNightUpdateSkipped: false, lensflareTextureFallback: false, postProcessingSetupFail: false,
+            lensflareSetupFail: false,
+        };
+
+        // --- Scene Constants ---
+        const SCENE_SIZE = 1100; // General size reference
+        const GROUND_PLANE_WIDTH = SCENE_SIZE * 3.5;
+        const GROUND_PLANE_HEIGHT = SCENE_SIZE * 3.5;
+        const GROUND_SEGMENTS_WIDTH = 150;
+        const GROUND_SEGMENTS_HEIGHT = 150;
+        const DISPLACEMENT_SCALE = 18;
+        const PYRAMID_BASE_OFFSET = DISPLACEMENT_SCALE * 0.05;
+        const CLOUD_PARTICLE_COUNT = 3800;
+        const CLOUD_SPREAD_XZ = SCENE_SIZE * 0.95;
+        const CLOUD_ALTITUDE_MIN = 180;
+        const CLOUD_ALTITUDE_MAX = 350;
+        const CLOUD_SIZE_MIN = 70;
+        const CLOUD_SIZE_MAX = 190;
+        const CLOUD_OPACITY = 0.75;
+        const BASE_CYCLE_DURATION = 120; // Seconds for one full day/night cycle
+        const SUN_DISTANCE = SCENE_SIZE * 1.8;
+        const VISUAL_SUN_DISTANCE = SUN_DISTANCE * 0.85; // Use same distance for visual & light now
+        const MOON_DISTANCE_FACTOR = 0.9;
+        const SUN_SPHERE_SIZE = 65; // Slightly smaller physical sphere, bloom will enlarge it
+        const MOON_SPHERE_SIZE = 70;
+        const SHADOW_MAP_SIZE = 2048;
+        const SHADOW_CAMERA_SIZE = 550;
+        const STAR_COUNT = 9000;
+        const STAR_FIELD_RADIUS = SCENE_SIZE * 2.5;
+        const STAR_BASE_SIZE = 0.8;
+        const STAR_FADE_THRESHOLD = 0.2;
+        const LENSFLARE_THRESHOLD = 0.1; // Sun Y normalized position threshold to show lens flare
+        let cycleSpeedFactor = 1.0;
+
+        // --- Texture URLs ---
+        const CDN_BASE = 'https://cdn.jsdelivr.net/npm/three@0.164.1/examples/';
+        const sandColorTextureUrl = 'https://images.unsplash.com/photo-1534171472159-edb6d1e0b63c?q=80&w=1374&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D'; // Check Unsplash terms
+        const sandDisplacementTextureUrl = sandColorTextureUrl; // Placeholder
+        const pyramidColorTextureUrl = CDN_BASE + 'textures/brick_diffuse.jpg'; // Placeholder
+        const pyramidNormalTextureUrl = CDN_BASE + 'textures/brick_normal.jpg'; // Placeholder
+        const moonTextureUrl = CDN_BASE + 'textures/planets/moon_1024.jpg';
+        const starTextureUrl = CDN_BASE + 'textures/particle/spark1.png';
+        const lensflareTex0Url = 'sun.png';
+        const lensflareTex3Url = 'sun.png';
+
+        // --- Colors for Day/Night Cycle ---
+        const DAY_SKY_COLOR = new THREE.Color(0x87CEEB);        // Light blue
+        const SUNSET_SKY_COLOR = new THREE.Color(0xFF955E);     // Orangey pink
+        const NIGHT_SKY_COLOR = new THREE.Color(0x03051a);      // Dark blue/purple
+        const DEEP_NIGHT_SKY_COLOR = new THREE.Color(0x010210); // Very dark blue
+        const DAY_SUN_COLOR_BASE = new THREE.Color(0xFFE87C);     // Base sun color (Yellowish)
+        const DAY_SUN_COLOR_EMISSIVE = new THREE.Color(0xFFF7AE); // Brighter emissive sun color
+        const SUNSET_SUN_COLOR_BASE = new THREE.Color(0xFFAD5B);    // Base sunset color (Orange)
+        const SUNSET_SUN_COLOR_EMISSIVE = new THREE.Color(0xFFD77F); // Brighter emissive sunset
+        const NIGHT_MOONLIGHT_COLOR = new THREE.Color(0xAEBED1); // Pale Blue/White
+        const DAY_AMBIENT_COLOR = new THREE.Color(0xE0E0E5);
+        const NIGHT_AMBIENT_COLOR = new THREE.Color(0x15152B);
+        const DAY_HEMI_SKY = new THREE.Color(0xBDE8FF);
+        const NIGHT_HEMI_SKY = new THREE.Color(0x080D35);
+        const DAY_HEMI_GROUND = new THREE.Color(0xC8B8A0);
+        const NIGHT_HEMI_GROUND = new THREE.Color(0x353045);
+        const currentColors = { sky: new THREE.Color(), sunBase: new THREE.Color(), sunEmissive: new THREE.Color(), moon: new THREE.Color(), ambient: new THREE.Color(), hemiSky: new THREE.Color(), hemiGround: new THREE.Color(), fog: new THREE.Color() };
+        const HORIZON_LEVEL = -SUN_DISTANCE * 0.05; // Virtual horizon line
+
+
+        /**
+         * Displays an error message on the screen and logs it to the console.
+         * Distinguishes between fatal errors (stopping execution) and warnings.
+         * @param {string} message The error message text.
+         * @param {boolean} [isFatal=false] If true, stops animation and marks as fatal.
+         * @param {string} [source="General"] The part of the code originating the error.
+         */
+        function displayError(message, isFatal = false, source = "General") {
+             const fullMessage = `[${source}] ${message}`;
+             if (fullMessage === lastErrorMessage) return; // Avoid duplicates
+             lastErrorMessage = fullMessage;
+
+             if (isFatal) console.error(`❌ FATAL ERROR: ${fullMessage}`);
+             else console.warn(`⚠️ WARNING: ${fullMessage}`);
+
+             const errorDiv = document.getElementById('error-message-display');
+             if (errorDiv) {
+                  if (errorHideTimer) clearTimeout(errorHideTimer); // Clear previous hide timer
+                  errorHideTimer = null;
+
+                  let displayMessage = `<strong>${isFatal ? '❌ FATAL Error' : '⚠️ Warning'} (${source}):</strong> ${message}`;
+
+                  if (isFatal) {
+                       displayMessage += `<br><br><strong>Initialization stopped or rendering halted.</strong><br>Check console & network tab for details.<br>Common issues: Failed critical resource (<code>textures</code>?), CORS error (run on local server!), WebGL error (browser/GPU issue), Failed Post-Processing setup.<br><br>Try a hard refresh (Ctrl+Shift+R).`;
+                       errorDiv.classList.add('fatal');
+                       errorDiv.classList.remove('warning');
+                  } else {
+                       displayMessage += `<br>(Scene may be partially functional or visually incomplete. Check console.)`;
+                       errorDiv.classList.remove('fatal');
+                       errorDiv.classList.add('warning');
+
+                       errorHideTimer = setTimeout(() => {
+                           if (errorDiv && !errorDiv.classList.contains('fatal')) {
+                               errorDiv.style.opacity = 0;
+                               setTimeout(() => {
+                                  if (!errorDiv.classList.contains('fatal')) {
+                                       errorDiv.style.display = 'none';
+                                       lastErrorMessage = null;
+                                   }
+                               }, 350);
+                           }
+                       }, errorDisplayTimeout);
+                  }
+
+                  errorDiv.innerHTML = displayMessage;
+                  errorDiv.style.display = 'block';
+                  requestAnimationFrame(() => { errorDiv.style.opacity = 1; });
+
+             } else {
+                  console.error("!! Error display element (#error-message-display) not found in HTML !!");
+                  alert(`[${isFatal ? 'FATAL' : 'WARNING'}] ${fullMessage}\n(Error display element missing - check console)`);
+             }
+
+             if (isFatal) {
+                  stopAnimationLoop();
+                  const controlsContainer = document.getElementById('controls-container');
+                  if (controlsContainer) controlsContainer.style.display = 'none';
+             }
+         }
+
+         /** Stops the main animation loop. */
+         function stopAnimationLoop() {
+             if (animationRequestId) {
+                 cancelAnimationFrame(animationRequestId);
+                 animationRequestId = null;
+                 console.log("Animation loop stopped.");
+             }
+         }
+
+         /** Loads a texture asynchronously with error handling. */
+         async function loadTextureAsync(url, srgb = true, repeatX = 1, repeatY = 1, isCritical = false, textureName = "Texture") {
+             if (!url || typeof url !== 'string' || url.trim() === '') {
+                 const msg = `Invalid or empty URL provided for ${textureName}.`;
+                 displayError(msg + ' Cannot load.', isCritical, "Texture Load");
+                 if (isCritical) throw new Error(msg + ` [${textureName}] is critical`);
+                 return null;
+             }
+
+             // Placeholder warnings
+             if (textureName.includes("Displacement") && url === sandColorTextureUrl && !warningsShown.displacementPlaceholder) {
+                 console.warn("Reminder: Using sand COLOR texture as displacement placeholder."); warningsShown.displacementPlaceholder = true;
+             }
+             if (textureName.includes("Pyramid") && (url.includes('brick_diffuse') || url.includes('brick_normal')) && !warningsShown.pyramidPlaceholder) {
+                 console.warn("Reminder: Using generic brick texture placeholders for pyramids."); warningsShown.pyramidPlaceholder = true;
+             }
+
+             console.log(`⏳ Loading ${isCritical ? 'CRITICAL' : 'Non-critical'} ${textureName}: ${url.substring(0,100)}${url.length>100?'...':''}`);
+              try {
+                  const tex = await textureLoader.loadAsync(url);
+                  tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+                  if (repeatX > 1 || repeatY > 1) {
+                      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+                      tex.repeat.set(repeatX, repeatY);
+                  }
+                  tex.needsUpdate = true;
+                  console.log(`✅ ${textureName} loaded successfully.`);
+                  return tex;
+              } catch (error) {
+                   const errorReason = error?.message || (error instanceof ProgressEvent ? `Network error or resource not found (check URL & CORS)` : 'Unknown loading error');
+                   const msg = `Failed to load ${textureName} from <code>${url}</code>. Reason: ${errorReason}`;
+                   displayError(msg, isCritical, "Texture Load");
+
+                   if (isCritical) {
+                       displayError(`Since [${textureName}] is critical, initialization cannot continue.`, true, "Critical Failure");
+                       throw new Error(msg + ` [Critical: ${textureName}]`);
+                   } else {
+                       // Specific warnings for non-critical fallbacks
+                       if (textureName === 'Moon Texture' && !warningsShown.moonTextureFallback) {
+                           console.warn("Moon will appear as a fallback gray sphere."); warningsShown.moonTextureFallback = true;
+                       } else if (textureName.startsWith('Lensflare Texture') && !warningsShown.lensflareTextureFallback) {
+                            console.warn("Lens flare effect might be incomplete or invisible due to texture load failure."); warningsShown.lensflareTextureFallback = true;
+                       } else if (textureName === 'Star Texture' && !warningsShown.starTextureFallback) {
+                           console.warn("Stars will appear as fallback squares due to texture load failure."); warningsShown.starTextureFallback = true;
+                       } else if (textureName.includes("Pyramid") && !warningsShown.pyramidPlaceholder) {
+                           console.warn("Pyramids will use a fallback gray material due to texture load failure."); warningsShown.pyramidPlaceholder = true;
+                       }
+                       return null;
+                   }
+              }
+         }
+
+        /** Creates the main perspective camera. */
+        function createCamera() {
+            try {
+                camera = new THREE.PerspectiveCamera(
+                    55, window.innerWidth / window.innerHeight, 1, STAR_FIELD_RADIUS * 1.2
+                );
+                camera.position.set(250, 120, 600);
+                camera.lookAt(0, 20, 0);
+                console.log("📷 Camera created.");
+                return true;
+            } catch (error) {
+                displayError(`Failed to create camera: ${error.message}`, true, "Init: Camera");
+                return false;
+            }
+        }
+
+        /** Creates the WebGL renderer. */
+        function createRenderer() {
+             let canvasElement;
+             try {
+                 if (!window.WebGLRenderingContext) { throw new Error("WebGL is not supported."); }
+                 renderer = new THREE.WebGLRenderer({
+                    antialias: true, powerPreference: "high-performance"
+                 });
+                 renderer.setSize(window.innerWidth, window.innerHeight);
+                 renderer.setPixelRatio(window.devicePixelRatio);
+                // renderer.outputColorSpace = THREE.SRGBColorSpace; // Managed by OutputPass now
+                 renderer.shadowMap.enabled = true;
+                 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                 renderer.toneMapping = THREE.ACESFilmicToneMapping;
+                 renderer.toneMappingExposure = 1.0;
+
+                 canvasElement = renderer.domElement;
+                 document.body.appendChild(canvasElement);
+
+                 // Context Loss Handling
+                 canvasElement.addEventListener('webglcontextlost', (event) => {
+                     event.preventDefault();
+                     if (!warningsShown.webglContextLoss) {
+                        displayError("WebGL context lost! Rendering suspended. Trying to restore...", false, "WebGL Context");
+                        warningsShown.webglContextLoss = true;
+                     }
+                     stopAnimationLoop();
+                 }, false);
+                 canvasElement.addEventListener('webglcontextrestored', () => {
+                     displayError("WebGL context restored. Reinitializing renderer state...", false, "WebGL Context");
+                     warningsShown.webglContextLoss = false;
+                     if (!animationRequestId && composer) { // Check composer exists too
+                          console.log("Restarting animation loop after context restoration.");
+                          animate();
+                      }
+                 }, false);
+
+                 console.log("🖌️ Renderer created and context loss handlers attached.");
+                 return true;
+             } catch (error) {
+                  const errorMsg = (error.message.includes("WebGL") || error.message.includes("canvas"))
+                      ? `Failed to initialize WebGL Renderer: ${error.message}. Ensure browser/GPU supports WebGL 2 and is enabled.`
+                      : `Failed to create Renderer: ${error.message}`;
+                  displayError(errorMsg, true, "Init: Renderer");
+                 if (canvasElement && canvasElement.parentElement) {
+                    canvasElement.parentElement.removeChild(canvasElement);
+                 }
+                 return false;
+             }
+        }
+
+       /** Sets up the Post Processing pipeline (Bloom effect). */
+       function createPostProcessing() {
+             if (!renderer || !scene || !camera) {
+                 displayError("Cannot create Post Processing: Renderer, Scene, or Camera missing.", true, "Init: PostProcessing");
+                 warningsShown.postProcessingSetupFail = true;
+                 return false;
+             }
+             try {
+                 composer = new EffectComposer(renderer);
+                 composer.addPass(new RenderPass(scene, camera));
+
+                 bloomPass = new UnrealBloomPass(
+                     new THREE.Vector2(window.innerWidth, window.innerHeight),
+                     1.1,  // strength - Main control for bloom intensity
+                     0.4,  // radius - Spread of the glow
+                     0.6   // threshold - How bright pixels need to be to bloom (lower = more bloom)
+                 );
+                 composer.addPass(bloomPass);
+
+                 // Add OutputPass to handle final color space conversion and encoding
+                 outputPass = new OutputPass();
+                 composer.addPass(outputPass);
+
+
+                 console.log("✨ Post Processing (UnrealBloomPass, OutputPass) created.");
+                 return true;
+             } catch (error) {
+                 displayError(`Failed to set up Post Processing: ${error.message}. Bloom effect disabled.`, false, "Init: PostProcessing"); // Non-fatal for now
+                 warningsShown.postProcessingSetupFail = true;
+                 composer = null; // Disable composer if setup failed
+                 return false;
+             }
+       }
+
+
+        /** Creates the main light sources. */
+        function createLights() {
+             try {
+                 ambientLight = new THREE.AmbientLight(DAY_AMBIENT_COLOR, 0.4);
+                 scene.add(ambientLight);
+
+                 hemisphereLight = new THREE.HemisphereLight(DAY_HEMI_SKY, DAY_HEMI_GROUND, 0.6);
+                 scene.add(hemisphereLight);
+
+                 sunLight = new THREE.DirectionalLight(DAY_SUN_COLOR_EMISSIVE, 1.0); // Use emissive color for light too
+                 sunLight.castShadow = true;
+                 sunLight.shadow.mapSize.width = SHADOW_MAP_SIZE;
+                 sunLight.shadow.mapSize.height = SHADOW_MAP_SIZE;
+                 sunLight.shadow.camera.near = 50;
+                 sunLight.shadow.camera.far = SUN_DISTANCE * 1.5;
+                 sunLight.shadow.camera.left = -SHADOW_CAMERA_SIZE;
+                 sunLight.shadow.camera.right = SHADOW_CAMERA_SIZE;
+                 sunLight.shadow.camera.top = SHADOW_CAMERA_SIZE;
+                 sunLight.shadow.camera.bottom = -SHADOW_CAMERA_SIZE;
+                 sunLight.shadow.bias = -0.0015;
+                 sunLight.shadow.normalBias = 0.03;
+                 sunLight.position.set(VISUAL_SUN_DISTANCE, 0, VISUAL_SUN_DISTANCE * 0.2); // Initial position
+                 sunLight.target.position.set(0, 0, 0);
+                 scene.add(sunLight);
+                 scene.add(sunLight.target);
+
+                 moonLight = new THREE.DirectionalLight(NIGHT_MOONLIGHT_COLOR, 0.0); // Starts invisible
+                 moonLight.castShadow = false;
+                 scene.add(moonLight);
+                 scene.add(moonLight.target);
+
+                 console.log("💡 Lights created (Sun, Moon, Ambient, Hemisphere).");
+                 return true;
+             } catch (error) {
+                 displayError(`Failed to create lights: ${error.message}`, true, "Init: Lights");
+                 return false;
+            }
+        }
+
+       /** Creates the Lens Flare effect attached to the Sun light. */
+       async function createLensFlare() {
+            if (!sunLight) {
+                 displayError("Cannot create Lens Flare: Sun Light missing.", false, "Init: Lens Flare");
+                 warningsShown.lensflareSetupFail = true;
+                 return; // Don't make this fatal
+            }
+            console.log("✨ Creating Lens Flare...");
+            try {
+                // Load flare textures concurrently
+                const [texFlare0, texFlare3] = await Promise.all([
+                     loadTextureAsync(lensflareTex0Url, true, 1, 1, false, "Lensflare Texture 0"), // Non-critical
+                     loadTextureAsync(lensflareTex3Url, true, 1, 1, false, "Lensflare Texture 3")  // Non-critical
+                 ]);
+
+                // Only create flare if at least the main texture loaded
+                if (texFlare0) {
+                     lensFlare = new Lensflare();
+
+                     // Add the main flare element
+                     lensFlare.addElement(new LensflareElement(texFlare0, 700, 0, sunLight.color)); // Size, distance (0=at light source), color
+
+                     // Add smaller artifact elements if texFlare3 loaded
+                     if (texFlare3) {
+                          lensFlare.addElement(new LensflareElement(texFlare3, 60, 0.6));  // Smaller element further out
+                          lensFlare.addElement(new LensflareElement(texFlare3, 70, 0.7));
+                          lensFlare.addElement(new LensflareElement(texFlare3, 120, 0.9));
+                          lensFlare.addElement(new LensflareElement(texFlare3, 70, 1.0)); // At the end
+                     } else {
+                          console.warn("Lens flare artifact texture (flare3) failed to load, flare will be simpler.");
+                          if (!warningsShown.lensflareTextureFallback) warningsShown.lensflareTextureFallback = true;
+                     }
+
+                     lensFlare.visible = false; // Start hidden
+                     sunLight.add(lensFlare); // Attach the flare to the light source itself
+                     console.log(`✅ Lens Flare created ${texFlare3 ? 'with artifacts' : ' (main flare only)'}.`);
+
+                 } else {
+                      displayError("Failed to load main lens flare texture (flare0). Lens flare effect disabled.", false, "Init: Lens Flare");
+                      if (!warningsShown.lensflareTextureFallback) warningsShown.lensflareTextureFallback = true;
+                      warningsShown.lensflareSetupFail = true;
+                 }
+
+            } catch (error) {
+                 displayError(`Failed to create Lens Flare: ${error.message}. Effect disabled.`, false, "Init: Lens Flare");
+                 warningsShown.lensflareSetupFail = true;
+            }
+        }
+
+
+        /** Creates the main environment elements. */
+        async function createEnvironment() {
+            console.log("⏳ Creating environment (Ground, Pyramids, Sun/Moon spheres)...");
+            let sandColorMap = null, displacementMap = null, pyramidColorMap = null, pyramidNormalMap = null, moonTexture = null;
+
+             try {
+                 [sandColorMap, displacementMap, pyramidColorMap, pyramidNormalMap, moonTexture] = await Promise.all([
+                     loadTextureAsync(sandColorTextureUrl, true, 90, 90, true, "Sand Color"), // CRITICAL
+                     loadTextureAsync(sandDisplacementTextureUrl, false, 90, 90, false, "Sand Displacement"), // Placeholder
+                     loadTextureAsync(pyramidColorTextureUrl, true, 2.5, 2.5, false, "Pyramid Color"), // Placeholder
+                     loadTextureAsync(pyramidNormalTextureUrl, false, 2.5, 2.5, false, "Pyramid Normal"), // Placeholder
+                     loadTextureAsync(moonTextureUrl, true, 1, 1, false, "Moon Texture")
+                 ]);
+             } catch (criticalTextureError) {
+                 console.error("Environment creation halted due to critical texture failure.");
+                 return false;
+             }
+
+             try {
+                 // --- Ground ---
+                 const groundMaterial = new THREE.MeshStandardMaterial({
+                     map: sandColorMap, displacementMap: displacementMap,
+                     displacementScale: displacementMap ? DISPLACEMENT_SCALE : 0,
+                     roughness: 0.98, metalness: 0.02, side: THREE.DoubleSide
+                 });
+                 const groundGeometry = new THREE.PlaneGeometry(GROUND_PLANE_WIDTH, GROUND_PLANE_HEIGHT, GROUND_SEGMENTS_WIDTH, GROUND_SEGMENTS_HEIGHT);
+                 ground = new THREE.Mesh(groundGeometry, groundMaterial);
+                 ground.rotation.x = -Math.PI / 2; ground.position.y = 0;
+                 ground.receiveShadow = true;
+                 scene.add(ground);
+                 console.log(`✓ Ground created. Displacement map: ${displacementMap ? 'Yes' : 'No (Placeholder/Failed)'}.`);
+
+                 // --- Pyramids ---
+                const pyramidMaterial = new THREE.MeshStandardMaterial({
+                    map: pyramidColorMap, normalMap: pyramidNormalMap,
+                    normalScale: pyramidNormalMap ? new THREE.Vector2(0.8, 0.8) : undefined,
+                    roughness: 0.85, metalness: 0.15,
+                    color: pyramidColorMap ? 0xFFFFFF : 0xAAAAAA
+                });
+                 if (!pyramidColorMap && !pyramidNormalMap && !warningsShown.pyramidPlaceholder) {
+                    console.warn("Using fallback gray material for pyramids as textures failed/missing.");
+                    warningsShown.pyramidPlaceholder = true;
+                 }
+                 const pyramidData = [
+                     { name: "Khufu (Great)", pos: new THREE.Vector3(-180, PYRAMID_BASE_OFFSET, 150), base: 165, height: 105 },
+                     { name: "Khafre",        pos: new THREE.Vector3(0,    PYRAMID_BASE_OFFSET, 0),   base: 155, height: 100 },
+                     { name: "Menkaure",      pos: new THREE.Vector3(170,  PYRAMID_BASE_OFFSET, -140), base: 100, height: 65 },
+                     { name: "G1a (Queen)",   pos: new THREE.Vector3(-225, PYRAMID_BASE_OFFSET, 175), base: 25, height: 17 },
+                     { name: "G1b (Queen)",   pos: new THREE.Vector3(-215, PYRAMID_BASE_OFFSET, 145), base: 25, height: 17 },
+                     { name: "G3a (Queen)",   pos: new THREE.Vector3(205,  PYRAMID_BASE_OFFSET, -125), base: 30, height: 20 },
+                 ];
+                 pyramids = pyramidData.map(data => {
+                     const pyramidGeometry = new THREE.ConeGeometry(data.base / Math.sqrt(2), data.height, 4);
+                     pyramidGeometry.rotateY(Math.PI / 4);
+                     const pyramidMesh = new THREE.Mesh(pyramidGeometry, pyramidMaterial);
+                     pyramidMesh.position.set(data.pos.x, data.pos.y + data.height / 2, data.pos.z);
+                     pyramidMesh.castShadow = true; pyramidMesh.receiveShadow = true;
+                     pyramidMesh.name = data.name;
+                     scene.add(pyramidMesh);
+                     return pyramidMesh;
+                 });
+                 console.log(`✓ ${pyramids.length} Pyramid structures created. Textures: ${pyramidColorMap ? 'Yes (Placeholder)' : 'No (Fallback Color)'}.`);
+
+                // --- Sun Sphere (Visual Representation - Enhanced) ---
+                const sunGeometry = new THREE.SphereGeometry(SUN_SPHERE_SIZE, 32, 16);
+                 // Use StandardMaterial to interact with bloom via emissive properties
+                 const sunMaterial = new THREE.MeshStandardMaterial({
+                     color: DAY_SUN_COLOR_BASE,             // Base color when not emissive
+                     emissive: DAY_SUN_COLOR_EMISSIVE,      // Color emitted by the sun object
+                     emissiveIntensity: 1.0,                // Multiplier for emissive color (controls bloom pickup)
+                     roughness: 0.9, metalness: 0.1,        // Less relevant for emissive, but good defaults
+                     fog: false,                            // Keep sun visible through fog
+                 });
+                sunSphere = new THREE.Mesh(sunGeometry, sunMaterial);
+                 // NOTE: Sun position is now directly linked to sunLight position in updateDayNightCycle
+                // sunSphere.renderOrder = 2; // Not strictly needed as bloom is post-processing
+                sunSphere.visible = false; // Start hidden
+                scene.add(sunSphere); // Add to scene BUT position controlled by light source now
+
+
+                // --- Moon Sphere ---
+                const moonGeometry = new THREE.SphereGeometry(MOON_SPHERE_SIZE, 32, 16);
+                const moonMaterial = new THREE.MeshStandardMaterial({
+                    map: moonTexture, emissive: moonTexture ? 0x1a1a1a : 0x000000,
+                    emissiveMap: moonTexture, color: moonTexture ? 0xFFFFFF : 0x888888,
+                    roughness: 0.95, metalness: 0.05, fog: false,
+                 });
+                 moonSphere = new THREE.Mesh(moonGeometry, moonMaterial);
+                 moonSphere.visible = false; // Start hidden
+                 scene.add(moonSphere);
+                 console.log(`✓ Sun/Moon visual spheres created. Sun uses Emissive Mat. Moon Texture: ${moonTexture ? 'Yes' : 'No (Fallback Color)'}.`);
+
+                 console.log("✅ Environment creation successful.");
+                 return true;
+
+             } catch (meshError) {
+                  displayError(`Failed during environment object (mesh/material) creation: ${meshError.message}.`, true, "Environment Setup");
+                  return false;
+             }
+        }
+
+        /** Generates a simple procedural cloud texture using Canvas. */
+        function createCloudTexture() {
+            const size = 128; const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+            gradient.addColorStop(0, 'rgba(255,255,255,0.9)'); gradient.addColorStop(0.3, 'rgba(255,255,255,0.6)');
+            gradient.addColorStop(1, 'rgba(255,255,255,0)');
+            context.fillStyle = gradient; context.fillRect(0, 0, size, size);
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.needsUpdate = true;
+            if (!warningsShown.generatedCloudTexture) {
+                 console.log("☁️ Using generated procedural texture for clouds.");
+                 warningsShown.generatedCloudTexture = true;
+            }
+            return texture;
+        }
+
+       /** Creates instanced mesh for clouds. */
+       async function createClouds() {
+            console.log("☁️ Creating instanced clouds...");
+             try {
+                 const cloudTexture = createCloudTexture();
+                 if (!cloudTexture) { console.warn("Cloud texture generation failed. Skipping clouds."); return; }
+
+                 const cloudGeo = new THREE.PlaneGeometry(1, 1);
+                 const cloudMaterial = new THREE.MeshStandardMaterial({
+                     map: cloudTexture, alphaMap: cloudTexture, transparent: true,
+                     depthWrite: false, side: THREE.DoubleSide, blending: THREE.NormalBlending,
+                     fog: true, roughness: 0.99, metalness: 0.0, opacity: CLOUD_OPACITY,
+                 });
+                 cloudInstanceMesh = new THREE.InstancedMesh(cloudGeo, cloudMaterial, CLOUD_PARTICLE_COUNT);
+                 const dummy = new THREE.Object3D();
+                 const position = new THREE.Vector3(); const rotation = new THREE.Euler();
+                 const quaternion = new THREE.Quaternion(); const scale = new THREE.Vector3();
+
+                 for (let i = 0; i < CLOUD_PARTICLE_COUNT; i++) {
+                     position.set(
+                         THREE.MathUtils.randFloatSpread(CLOUD_SPREAD_XZ * 2),
+                         THREE.MathUtils.randFloat(CLOUD_ALTITUDE_MIN, CLOUD_ALTITUDE_MAX),
+                         THREE.MathUtils.randFloatSpread(CLOUD_SPREAD_XZ * 2)
+                     );
+                     rotation.set(0, Math.random() * Math.PI * 2, 0);
+                     quaternion.setFromEuler(rotation);
+                     const s = THREE.MathUtils.randFloat(CLOUD_SIZE_MIN, CLOUD_SIZE_MAX);
+                     scale.set(s, s, 1);
+                     dummy.position.copy(position); dummy.quaternion.copy(quaternion);
+                     dummy.scale.copy(scale); dummy.updateMatrix();
+                     cloudInstanceMesh.setMatrixAt(i, dummy.matrix);
+                 }
+                 cloudInstanceMesh.instanceMatrix.needsUpdate = true;
+                 cloudInstanceMesh.renderOrder = 1;
+                 scene.add(cloudInstanceMesh);
+                 console.log(`✅ ${CLOUD_PARTICLE_COUNT} cloud instances created.`);
+
+             } catch (error) {
+                  displayError(`Failed to create clouds: ${error.message}`, false, "Init: Clouds");
+             }
+        }
+
+       /** Creates the starfield using THREE.Points. */
+       async function createStars() {
+             console.log("✨ Creating stars...");
+             try {
+                 const starVertices = []; const starColors = [];
+                 const baseStarColor = new THREE.Color(0.95, 0.95, 1.0);
+                 for (let i = 0; i < STAR_COUNT; i++) {
+                     const theta = 2 * Math.PI * Math.random();
+                     const phi = Math.acos(2 * Math.random() - 1);
+                     const r = STAR_FIELD_RADIUS * Math.cbrt(Math.random());
+                     const x = r * Math.sin(phi) * Math.cos(theta);
+                     const y = r * Math.cos(phi);
+                     const z = r * Math.sin(phi) * Math.sin(theta);
+                     starVertices.push(x, y, z);
+                     const colorVariation = THREE.MathUtils.randFloat(0.9, 1.1);
+                     const finalColor = baseStarColor.clone().multiplyScalar(colorVariation).clampScalar(0.0, 1.0);
+                     starColors.push(finalColor.r, finalColor.g, finalColor.b);
+                 }
+                 const geometry = new THREE.BufferGeometry();
+                 geometry.setAttribute('position', new THREE.Float32BufferAttribute(starVertices, 3));
+                 geometry.setAttribute('color', new THREE.Float32BufferAttribute(starColors, 3));
+                 const starTexture = await loadTextureAsync(starTextureUrl, true, 1, 1, false, "Star Texture");
+                 const material = new THREE.PointsMaterial({
+                     map: starTexture, size: STAR_BASE_SIZE, sizeAttenuation: true,
+                     transparent: true, opacity: 0, depthWrite: false,
+                     blending: THREE.AdditiveBlending, vertexColors: true
+                 });
+                  if (!starTexture && starTextureUrl && !warningsShown.starTextureFallback) {
+                      console.log("Using default square points for stars (texture load failed/missing).");
+                      warningsShown.starTextureFallback = true;
+                  }
+                 stars = new THREE.Points(geometry, material);
+                 stars.renderOrder = -1; stars.visible = false;
+                 scene.add(stars);
+                 console.log(`✅ Created ${STAR_COUNT} stars geometry. Texture: ${starTexture ? 'Loaded' : 'Fallback'}.`);
+
+             } catch (error) {
+                  displayError(`Failed to create stars: ${error.message}`, false, "Init: Stars");
+             }
+         }
+
+        /** Creates OrbitControls for camera interaction. */
+        function createControls() {
+             if (!camera || !renderer?.domElement) {
+                 displayError("Cannot create controls: Camera or Renderer DOM element missing.", true, "Init: Controls");
+                 return false;
+             }
+             try {
+                 controls = new OrbitControls(camera, renderer.domElement);
+                 controls.enableDamping = true; controls.dampingFactor = 0.05;
+                 controls.screenSpacePanning = false; controls.minDistance = 50;
+                 controls.maxDistance = SCENE_SIZE * 1.5; controls.maxPolarAngle = Math.PI / 2 - 0.05;
+                 controls.target.set(0, PYRAMID_BASE_OFFSET + 30, 0);
+                 controls.update();
+                 console.log("🖱️ OrbitControls created.");
+                 return true;
+             } catch (error) {
+                 displayError(`Failed to create OrbitControls: ${error.message}. Check import. Camera control unavailable.`, true, "Init: Controls");
+                 return false;
+             }
+        }
+
+        /** Sets up the event listener for the speed control slider. */
+        function setupSpeedSlider() {
+             const speedSlider = document.getElementById('speedSlider');
+             const speedValueSpan = document.getElementById('speedValue');
+             if (speedSlider && speedValueSpan) {
+                 try {
+                     cycleSpeedFactor = parseFloat(speedSlider.value) || 1.0;
+                     cycleSpeedFactor = Math.max(0.1, Math.min(cycleSpeedFactor, 20.0));
+                     speedValueSpan.textContent = `${cycleSpeedFactor.toFixed(1)}x`;
+
+                     speedSlider.addEventListener('input', (event) => {
+                         try {
+                             let newSpeed = parseFloat(event.target.value);
+                             if (!isNaN(newSpeed)) {
+                                 cycleSpeedFactor = Math.max(0.1, Math.min(newSpeed, 20.0));
+                                 speedValueSpan.textContent = `${cycleSpeedFactor.toFixed(1)}x`;
+                             }
+                         } catch(e) { console.error("Error processing speed slider input:", e); }
+                     });
+                     console.log("⚙️ Speed control slider initialized.");
+                     return true;
+                 } catch(e) {
+                     displayError(`Speed control UI setup failed: ${e.message}. Using default speed 1.0x.`, false, "UI Setup");
+                     cycleSpeedFactor = 1.0; return false;
+                 }
+             } else {
+                 displayError("Speed control UI elements missing (#speedSlider or #speedValue). Using default speed 1.0x.", false, "UI Setup");
+                 cycleSpeedFactor = 1.0; return false;
+             }
+        }
+
+        /** Handles window resize events. */
+        function onWindowResize() {
+            if (!camera || !renderer) return;
+             try {
+                 const width = window.innerWidth;
+                 const height = window.innerHeight;
+                 camera.aspect = width / height;
+                 camera.updateProjectionMatrix();
+                 renderer.setSize(width, height);
+                 // Also update composer and bloom pass
+                 if (composer) composer.setSize(width, height);
+                 if (bloomPass) bloomPass.resolution.set(width, height);
+
+             } catch (e) { console.error("Error during window resize:", e); }
+        }
+
+        /** Updates the scene based on the day/night cycle. */
+        function updateDayNightCycle(elapsedTime) {
+            // --- Pre-computation Checks ---
+            if (!sunLight || !moonLight || !ambientLight || !hemisphereLight || !scene?.fog || !sunSphere || !moonSphere || !stars?.material || !renderer || !sunSphere.material) { // Added sunSphere.material check
+                 if (!warningsShown.dayNightUpdateSkipped) {
+                     console.warn("Skipping Day/Night cycle update: Required scene components missing.");
+                     warningsShown.dayNightUpdateSkipped = true;
+                 } return;
+             }
+             if (warningsShown.dayNightUpdateSkipped) warningsShown.dayNightUpdateSkipped = false;
+
+             // --- Calculate Time and Angles ---
+             const actualCycleDuration = Math.max(0.1, BASE_CYCLE_DURATION / cycleSpeedFactor);
+             const timeRatio = (elapsedTime % actualCycleDuration) / actualCycleDuration;
+             const currentAngle = timeRatio * Math.PI * 2;
+             const moonAngle = currentAngle + Math.PI;
+
+             // --- Update Light and Sphere Positions ---
+             const sunY = Math.sin(currentAngle) * VISUAL_SUN_DISTANCE * 0.75;
+             const sunX = Math.cos(currentAngle) * VISUAL_SUN_DISTANCE;
+             const sunZ = VISUAL_SUN_DISTANCE * 0.2;
+             const sunPosition = new THREE.Vector3(sunX, sunY, sunZ);
+             sunLight.position.copy(sunPosition);
+             sunSphere.position.copy(sunPosition); // Link sphere position directly to light
+             sunLight.target.position.set(0, 0, 0);
+
+             const moonDistance = VISUAL_SUN_DISTANCE * MOON_DISTANCE_FACTOR;
+             const moonY = Math.sin(moonAngle) * moonDistance * 0.75;
+             const moonX = Math.cos(moonAngle) * moonDistance;
+             const moonZ = -moonDistance * 0.2;
+             const moonPosition = new THREE.Vector3(moonX, moonY, moonZ);
+             moonLight.position.copy(moonPosition);
+             moonSphere.position.copy(moonPosition); // Link moon sphere position directly
+             moonLight.target.position.set(0, 0, 0);
+
+             // --- Calculate Lighting Factors ---
+             const sunElevationFactor = THREE.MathUtils.smoothstep(sunY, HORIZON_LEVEL, VISUAL_SUN_DISTANCE * 0.75); // Normalize height 0 to 1
+             const moonElevationFactor = THREE.MathUtils.smoothstep(moonY, HORIZON_LEVEL * MOON_DISTANCE_FACTOR, moonDistance * 0.75);
+             const sunsetGlow = (1.0 - Math.abs(sunY / (VISUAL_SUN_DISTANCE * 0.75)))**2.5; // Slightly narrower sunset band
+             const sunsetFactor = THREE.MathUtils.smoothstep(sunsetGlow, 0.5, 0.9) * (1.0 - moonElevationFactor * 0.6);
+             const dayNightLerp = sunElevationFactor; // 0 = night, 1 = day
+
+             // --- Update Light Intensities ---
+             const dayIntensity = Math.max(0, Math.sin(currentAngle)); // 0 to 1 based on angle
+             sunLight.intensity = THREE.MathUtils.lerp(0, 4.5, dayIntensity * sunElevationFactor); // Boosted max intensity for bloom
+
+             const nightIntensity = Math.max(0, Math.sin(moonAngle));
+             moonLight.intensity = THREE.MathUtils.lerp(0, 0.75, nightIntensity * moonElevationFactor * (1.0 - sunElevationFactor * 0.7));
+
+             ambientLight.intensity = THREE.MathUtils.lerp(0.15, 0.6, dayNightLerp);
+             hemisphereLight.intensity = THREE.MathUtils.lerp(0.2, 1.0, dayNightLerp);
+
+             // --- Update Light Colors & Fog ---
+             currentColors.sky.lerpColors(NIGHT_SKY_COLOR, DAY_SKY_COLOR, dayNightLerp)
+                             .lerp(SUNSET_SKY_COLOR, sunsetFactor * 1.1)
+                             .lerp(DEEP_NIGHT_SKY_COLOR, 1.0 - Math.max(sunElevationFactor, moonElevationFactor * 0.7));
+
+             // Update Sun Colors (Base and Emissive separately)
+             currentColors.sunBase.lerpColors(SUNSET_SUN_COLOR_BASE, DAY_SUN_COLOR_BASE, dayNightLerp * 1.1);
+             currentColors.sunEmissive.lerpColors(SUNSET_SUN_COLOR_EMISSIVE, DAY_SUN_COLOR_EMISSIVE, dayNightLerp * 1.2);
+
+             currentColors.ambient.lerpColors(NIGHT_AMBIENT_COLOR, DAY_AMBIENT_COLOR, dayNightLerp);
+             currentColors.hemiSky.lerpColors(NIGHT_HEMI_SKY, DAY_HEMI_SKY, dayNightLerp)
+                                .lerp(SUNSET_SKY_COLOR, sunsetFactor * 0.5);
+             currentColors.hemiGround.lerpColors(NIGHT_HEMI_GROUND, DAY_HEMI_GROUND, dayNightLerp)
+                                   .lerp(SUNSET_SKY_COLOR, sunsetFactor * 0.15);
+
+             // Apply calculated colors
+             sunLight.color.copy(currentColors.sunEmissive); // Light color matches emissive
+             sunSphere.material.color.copy(currentColors.sunBase);
+             sunSphere.material.emissive.copy(currentColors.sunEmissive);
+             // Make emissive stronger during full day, weaker at sunrise/sunset for softer bloom
+             sunSphere.material.emissiveIntensity = THREE.MathUtils.lerp(0.5, 2.0, dayIntensity * sunElevationFactor);
+
+             moonLight.color.copy(NIGHT_MOONLIGHT_COLOR);
+             if (moonSphere.material instanceof THREE.MeshStandardMaterial) {
+                  moonSphere.material.emissive.copy(NIGHT_MOONLIGHT_COLOR).multiplyScalar(Math.max(0.05, nightIntensity * 0.6));
+             }
+
+             ambientLight.color.copy(currentColors.ambient);
+             hemisphereLight.color.copy(currentColors.hemiSky);
+             hemisphereLight.groundColor.copy(currentColors.hemiGround);
+
+             // Fog
+             currentColors.fog.copy(currentColors.sky);
+             if(scene.fog) {
+                scene.fog.color.copy(currentColors.fog);
+                scene.fog.near = THREE.MathUtils.lerp(150, 600, dayNightLerp);
+                scene.fog.far = THREE.MathUtils.lerp(SCENE_SIZE * 1.3, SCENE_SIZE * 3.0, dayNightLerp);
+             }
+
+             // --- Update Visibility ---
+             const sunVisible = sunY > HORIZON_LEVEL * 1.1 && sunLight.intensity > 0.01; // Needs to be slightly higher for visibility
+             sunSphere.visible = sunVisible;
+
+             // Lens Flare Visibility
+             if (lensFlare) {
+                 lensFlare.visible = sunVisible && (sunY / (VISUAL_SUN_DISTANCE * 0.75) > LENSFLARE_THRESHOLD);
+             }
+
+             moonSphere.visible = moonY > HORIZON_LEVEL && moonLight.intensity > 0.01;
+
+             // Stars
+             const nightFactor = 1.0 - dayNightLerp;
+             const starOpacity = THREE.MathUtils.smoothstep(nightFactor, STAR_FADE_THRESHOLD, 1.0);
+             stars.material.opacity = starOpacity;
+             stars.visible = starOpacity > 0.01;
+
+             // Adjust Tone Mapping & Bloom based on sun intensity
+             renderer.toneMappingExposure = THREE.MathUtils.lerp(0.85, 1.05, dayNightLerp);
+              if (bloomPass && !warningsShown.postProcessingSetupFail) {
+                   // Make bloom stronger during full daylight
+                   bloomPass.strength = THREE.MathUtils.lerp(0.5, 1.2, dayIntensity * sunElevationFactor);
+               }
+        }
+
+        /** Main animation loop. */
+        function animate() {
+             animationRequestId = requestAnimationFrame(animate);
+
+             // --- Sanity Checks ---
+             if ((!renderer && !composer) || !scene || !camera || !clock) { // Check composer as alternative to renderer
+                  if (!animateLoopFatalErrorLogged) {
+                       console.error("Animation loop stopping: Critical component missing (Renderer/Composer/Scene/Camera/Clock). Likely initialization failure.");
+                       animateLoopFatalErrorLogged = true;
+                  }
+                  stopAnimationLoop(); return;
+             }
+             if(animateLoopFatalErrorLogged) animateLoopFatalErrorLogged = false;
+
+             // --- Calculate Time Delta ---
+             const delta = clock.getDelta();
+             const elapsedTime = clock.getElapsedTime();
+
+             // --- Update Scene Elements ---
+             try { updateDayNightCycle(elapsedTime); }
+             catch (e) {
+                  displayError(`Error during day/night cycle update: ${e.message}.`, false, "Animation Update");
+                  console.error("Day/Night cycle update failed:", e);
+             }
+             try { if (controls?.update) { controls.update(); } }
+             catch (e) {
+                 displayError(`Error updating camera controls: ${e.message}.`, false, "Animation Controls");
+                 console.error("OrbitControls update failed:", e);
+             }
+
+             // --- Render the Scene ---
+             try {
+                 // Use composer if it exists and wasn't flagged as failed, otherwise fallback to renderer
+                  if (composer && !warningsShown.postProcessingSetupFail) {
+                       composer.render(delta); // Pass delta for potential time-based effects
+                  } else if (renderer) {
+                       renderer.render(scene, camera); // Fallback if post-processing failed
+                       // Show a one-time warning if falling back
+                        if (!warningsShown.postProcessingSetupFail && !warningsShown.postProcessingFallbackRender) {
+                           console.warn("Rendering directly with renderer due to post-processing setup failure/absence.");
+                            warningsShown.postProcessingFallbackRender = true; // Use a new flag
+                       }
+                  }
+             } catch (renderError) {
+                  const errorMsg = renderError.message.includes('context lost')
+                      ? `WebGL context lost during render: ${renderError.message}. Rendering stopped.` // Handled by context listener too
+                      : `WebGL Rendering failed: ${renderError.message}. Check console for shader/GPU errors.`;
+                  displayError(errorMsg, true, "WebGL Render");
+                  console.error("--- WebGL RENDER ERROR ---", renderError);
+                  stopAnimationLoop();
+             }
+        }
+
+        /** Asynchronously initializes the Three.js scene. */
+        async function initializeScene() {
+            console.log(`%cInitializing Three.js scene (r${THREE.REVISION}) - Enhanced Sun...`, 'color: #00ddaa; font-weight: bold;');
+             clock = new THREE.Clock();
+             scene = new THREE.Scene();
+             scene.fog = new THREE.Fog(DAY_SKY_COLOR, 200, SCENE_SIZE * 2);
+
+             // --- Initialization Steps ---
+             if (!createCamera()) return false;
+             if (!createRenderer()) return false; // Needs renderer before post-processing
+             if (!createLights()) return false;   // Needs lights (esp. sunLight) before lens flare
+
+             // Post Processing MUST be created after Renderer
+             createPostProcessing(); // Non-fatal if fails, will fallback
+
+             const envOk = await createEnvironment(); // Creates ground, pyramids, sun/moon meshes
+             if (!envOk) return false;
+
+             // Non-critical async elements
+             const cloudPromise = createClouds();
+             const starPromise = createStars();
+             const lensFlarePromise = createLensFlare(); // Now async due to texture loading
+
+             if (!createControls()) return false;
+             setupSpeedSlider();
+
+             try {
+                // Wait for non-critical async parts (esp. lens flare now)
+                await Promise.all([cloudPromise, starPromise, lensFlarePromise]);
+             } catch (err) {
+                 console.warn("Minor issue during non-critical asset finalization:", err); // Should be caught internally too
+             }
+
+             window.addEventListener('resize', onWindowResize, false);
+
+             console.log("✅ Scene initialization sequence seemingly completed.");
+             return true;
+        }
+
+        /** Main entry point. */
+        async function main() {
+            console.warn("=== Starting Pyramid Scene Script ===");
+            console.warn("🔔 Important: Run this HTML file using a LOCAL WEB SERVER (e.g., VS Code Live Server, `python -m http.server`).");
+
+            try {
+                 const initialized = await initializeScene();
+                 if (initialized) {
+                     console.log("🚀 Initialization successful. Starting animation loop...");
+                     animate();
+                 } else {
+                      console.error("❌ Scene initialization failed. Animation not started.");
+                       const errorDiv = document.getElementById('error-message-display');
+                       if (errorDiv && !errorDiv.classList.contains('fatal') && errorDiv.style.display !== 'block') {
+                           displayError("Scene initialization failed. Check console logs.", true, "Initialization Fallback");
+                       }
+                 }
+            } catch (unhandledError) {
+                 console.error("--- !!! UNHANDLED ASYNC INITIALIZATION ERROR !!! ---");
+                 displayError(`Fatal Error during async setup: ${unhandledError.message}. Unexpected.`, true, "Main Async Catch");
+                 console.error("Unhandled Error Details:", unhandledError);
+                 stopAnimationLoop();
+            }
+        }
+
+        // --- Start Execution ---
+        if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', main); }
+        else { main(); }
+
+    </script>
+</body>
+</html>
